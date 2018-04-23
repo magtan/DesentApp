@@ -5,16 +5,27 @@ package com.example.desent.desent.models;
  */
 
 
+import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.preference.PreferenceManager;
 import android.util.Log;
 
+import com.example.desent.desent.utils.SendMailTask;
+import com.opencsv.CSVWriter;
+
+import java.io.File;
+import java.io.FileWriter;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
-
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.List;
 
 
 public class DatabaseHelper extends SQLiteOpenHelper {
@@ -34,12 +45,18 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     private Cursor lastDateInRow;
     private String oldDate;
 
+    // Submit data
+    int submitInterval = 10080; //minutes (1 week)
+    private SharedPreferences prefs;
+
     // Table names
     public static final String TABLE_NAME = "USERINPUT";
     public static final String TABLE_DISTANCE = "DISTANCETRACKER";
     public static final String TABLE_ENERGY = "ENERGY";
     public static final String TABLE_HOME = "HOME";
     public static final String TABLE_FORECAST = "FORECAST";
+    public static final String TABLE_DESENT_DATA = "DESENT_DATA";
+    public static final String TABLE_SUBMIT_DATA = "SUBMIT_DATA";
 
     // COL's for TABLE_DISTANCE
     public static final String D_COL_1 = "DATE";
@@ -80,6 +97,20 @@ public class DatabaseHelper extends SQLiteOpenHelper {
     private static final String FO_COL3 = "CLOUDS_FORECAST";
     private static final String FO_COL4 = "IRRADIANCE_FORECAST";
 
+    // DESENT_DATA table columns
+    private static final String DD_TIME = "TIME";
+    private static final String DD_LONGITUDE = "LONGITUDE";
+    private static final String DD_LATITUDE = "LATITUDE";
+    private static final String DD_SPEED = "SPEED";
+    private static final String DD_ACCELERATION_X = "ACCELERATION_X";
+    private static final String DD_ACCELERATION_Y = "ACCELERATION_Y";
+    private static final String DD_ACCELERATION_Z = "ACCELERATION_Z";
+    private static final String DD_ACTIVITY = "ACTIVITY";
+
+    // SUBMIT_DATA tabel columns
+    private static final String SD_ID = "ID";
+    private static final String SD_LAST_SUBMIT = "LAST_SUBMIT";
+    private static final String SD_NEXT_SUBMIT = "NEXT_SUBMIT";
 
     public DatabaseHelper(Context context) {
         super(context, DATABASE_NAME, null, 1);
@@ -105,6 +136,20 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 + FO_COL2 + " NUMERIC, "
                 + FO_COL3 + " NUMERIC, "
                 + FO_COL4 + " NUMERIC )");
+        db.execSQL("CREATE TABLE " + TABLE_DESENT_DATA + "("
+                + DD_TIME + " INTEGER PRIMARY KEY , "
+                + DD_LONGITUDE + " NUMERIC, "
+                + DD_LATITUDE + " NUMERIC, "
+                + DD_SPEED + " NUMERIC, "
+                + DD_ACCELERATION_X + " NUMERIC, "
+                + DD_ACCELERATION_Y + " NUMERIC, "
+                + DD_ACCELERATION_Z + " NUMERIC, "
+                + DD_ACTIVITY + " NUMERIC )");
+        db.execSQL("CREATE TABLE " + TABLE_SUBMIT_DATA + "("
+                + SD_ID + " INTEGER PRIMARY KEY , "
+                + SD_LAST_SUBMIT + " INTEGER, "
+                + SD_NEXT_SUBMIT + " INTEGER )");
+
     }
 
     @Override
@@ -112,6 +157,8 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         db.execSQL("DROP TABLE IF EXISTS " + TABLE_NAME);
         db.execSQL("DROP TABLE IF EXISTS " + TABLE_ENERGY);
         db.execSQL("DROP TABLE IF EXISTS " + TABLE_FORECAST);
+        db.execSQL("DROP TABLE IF EXISTS " + TABLE_DESENT_DATA);
+        db.execSQL("DROP TABLE IF EXISTS " + TABLE_SUBMIT_DATA);
         onCreate(db);
     }
 
@@ -374,6 +421,169 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         db.close();
 
         return result != -1;
+    }
+
+    public boolean insertDesentData(long time, double longitude, double latitude, float speed, float accX, float accY, float accZ, String activity) {
+        SQLiteDatabase db = this.getWritableDatabase();
+
+        ContentValues contentValues = new ContentValues();
+        contentValues.put(DD_TIME, time);
+        contentValues.put(DD_LONGITUDE, longitude);
+        contentValues.put(DD_LATITUDE, latitude);
+        contentValues.put(DD_SPEED, speed);
+        contentValues.put(DD_ACCELERATION_X, accX);
+        contentValues.put(DD_ACCELERATION_Y, accY);
+        contentValues.put(DD_ACCELERATION_Z, accZ);
+        contentValues.put(DD_ACTIVITY, activity);
+
+        Log.d("insertDesentData", "time: " + String.valueOf(time) +
+                " longitude: " + String.valueOf(longitude) +
+                " latitude: " + String.valueOf(latitude) +
+                " speed: " + String.valueOf(speed) +
+                " accX: " + String.valueOf(accX) +
+                " accY: " + String.valueOf(accY) +
+                " accZ: " + String.valueOf(accZ) +
+                " Activity: " + activity);
+
+        long result = db.insert(TABLE_DESENT_DATA, null, contentValues);
+        db.close();
+
+        return result != -1;
+    }
+
+    public Cursor getDesentData() {
+        Cursor res;
+        SQLiteDatabase db = this.getWritableDatabase();
+        String tabName = TABLE_DESENT_DATA;
+        if(checkIfEmpty(db, tabName)){
+            //Table is empty
+            res = null;
+
+        }else{
+            // Table is not empty
+            res = tableToString(db, tabName);
+        }
+
+        return res;
+    }
+
+    public boolean submitDesentData(Activity activityContext) {
+        SQLiteDatabase db = this.getWritableDatabase();
+        prefs = PreferenceManager.getDefaultSharedPreferences(activityContext);
+        boolean result;
+
+        // First time
+        if(checkIfEmpty(db, TABLE_SUBMIT_DATA)){
+            //Add next submit date
+            Calendar calendar = new GregorianCalendar();
+            long currentTime = calendar.getTimeInMillis();
+            calendar.add(GregorianCalendar.MINUTE, submitInterval);
+            long nextSubmit = calendar.getTimeInMillis();
+
+            ContentValues contentValues = new ContentValues();
+            contentValues.put(SD_LAST_SUBMIT, currentTime);
+            contentValues.put(SD_NEXT_SUBMIT, nextSubmit);
+
+            long res = db.insert(TABLE_SUBMIT_DATA, null, contentValues);
+            Log.i(LOG, "submitDesentData. First value inserted: " + String.valueOf(res));
+
+            result = false;
+            db.close();
+
+        }else{
+            // Table is not empty. Get current time.
+            Calendar calendar = new GregorianCalendar();
+            long currentTime = calendar.getTimeInMillis();
+
+            // Fetch next submit date
+            Cursor queryNextSubmit = db.rawQuery("select " + SD_NEXT_SUBMIT + " from " + TABLE_SUBMIT_DATA, null);
+            queryNextSubmit.moveToFirst();
+            long submit = queryNextSubmit.getLong(0);
+
+            // Compare and check if it is time to send
+            if(currentTime > submit){
+                // Send data
+                String fromEmail = "desent.data@gmail.com";
+                String fromPassword = "datasubmitter";
+                String emailSubject = prefs.getString("pref_key_personal_email", "Missing input");
+                String emailBody = "";
+
+                new SendMailTask(activityContext).execute(fromEmail,
+                        fromPassword, emailSubject, emailBody, getCSV(activityContext));
+                // Calculate and update new submit time
+                calendar.add(GregorianCalendar.MINUTE, submitInterval);
+                long nextSubmit = calendar.getTimeInMillis();
+
+                ContentValues contentValues = new ContentValues();
+                contentValues.put(SD_ID, 1);
+                contentValues.put(SD_LAST_SUBMIT, currentTime);
+                contentValues.put(SD_NEXT_SUBMIT, nextSubmit);
+                int res = db.update(TABLE_SUBMIT_DATA, contentValues, "ID = ?", new String[]{"1"});
+                Log.i(LOG, "submitDesentDataNext. submit updated: " + String.valueOf(res) + " Time: " + String.valueOf(nextSubmit));
+                if(res > 0){
+                    result = true;
+                }else{
+                    result = false;
+                }
+            }else{
+                // Do nothing
+                Log.i(LOG, "submitDesentData. Next submit not updated. currentTime < submit");
+                result = false;
+            }
+        }
+
+        return result;
+    }
+
+    public String getCSV(Activity activityContext) {
+        String idEmail = prefs.getString("pref_key_personal_email", "Missing email from user");
+        String csv = "Desent data collector\n\n";
+
+        String heatType = prefs.getString("pref_key_heat_type", "Missing input");
+        String heatEfficiency = prefs.getString("pref_key_heat_efficiency", "Missing input");
+        String heatFuelCost = prefs.getString("pref_key_heat_fuel_cost", "Missing input");
+        String heatLastYear = prefs.getString("pref_key_heat_prev_yr", "Missing input");
+
+        String idRow = "ID," + idEmail + "\n\n";
+        String heatHeader = "Heating system\nHeatType,Efficiency[%],FuelCost,ConsumptionLastYear\n";
+        String heat = heatHeader + heatType + "," + heatEfficiency + "," + heatFuelCost + "," + heatLastYear +"\n";
+
+        String firstRowRow = "\n\nData log:\nTime [ms],dd/MM/yyyy hh:mm:ss.SSS,Longitude,Latitude,Speed,AccelerationX,AccelerationY,AccelerationZ,activity\n";
+
+        Cursor curCSV = getDesentData();
+
+        csv = idRow + csv + heat + firstRowRow;
+
+        SimpleDateFormat formatter = new SimpleDateFormat("dd/MM/yyyy hh:mm:ss.SSS");
+
+        // Create a calendar object that will convert the date and time value in milliseconds to date.
+        Calendar calendar = Calendar.getInstance();
+
+
+        if(curCSV != null){
+            while(curCSV.moveToNext()) {
+                long time = curCSV.getLong(0);
+                calendar.setTimeInMillis(time);
+                String formattedDate = formatter.format(calendar.getTime());
+                double longitude = curCSV.getDouble(1);
+                double latitude = curCSV.getDouble(2);
+                float speed = curCSV.getFloat(3);
+                float accX = curCSV.getFloat(4);
+                float accY = curCSV.getFloat(5);
+                float accZ = curCSV.getFloat(6);
+                String activity = curCSV.getString(7);
+
+                String strRow = String.valueOf(time)+ "," + formattedDate + "," +String.valueOf(longitude)+ "," +String.valueOf(latitude)+ ","
+                        +String.valueOf(speed)+ "," +String.valueOf(accX)+","
+                        +String.valueOf(accY)+ "," +String.valueOf(accZ)+ ","
+                        + activity+"\n";
+
+                csv = csv + strRow;
+            }
+            curCSV.close();
+        }
+
+        return csv;
     }
 
 
@@ -846,6 +1056,34 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             //Not empty table
             return true;
         }
+    }
+
+    public Cursor tableToString(SQLiteDatabase db, String tableName) {
+        Log.d("","tableToString called");
+        String tableString = String.format("Table %s:\n", tableName);
+        Cursor allRows  = db.rawQuery("SELECT * FROM " + tableName, null);
+
+        //tableString += cursorToString(allRows);
+        //return tableString;
+        return allRows;
+    }
+
+    public String cursorToString(Cursor cursor){
+        String cursorString = "";
+        if (cursor.moveToFirst() ){
+            String[] columnNames = cursor.getColumnNames();
+            for (String name: columnNames)
+                cursorString += String.format("%s ][ ", name);
+            cursorString += "\n";
+            do {
+                for (String name: columnNames) {
+                    cursorString += String.format("%s ][ ",
+                            cursor.getString(cursor.getColumnIndex(name)));
+                }
+                cursorString += "\n";
+            } while (cursor.moveToNext());
+        }
+        return cursorString;
     }
 
 
